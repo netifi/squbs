@@ -64,7 +64,10 @@ object UnicomplexBoot extends LazyLogging {
     ACTORS,
 
     // Identifies service as startup type
-    SERVICES = Value
+    SERVICES,
+
+    // Identifies Proteus services as startup type
+    PROTEUS = Value
   }
 
   case class CubeInit(info: Cube, components: Map[StartupType.Value, Seq[Config]])
@@ -232,6 +235,7 @@ object UnicomplexBoot extends LazyLogging {
     val c = Seq(
         config.getOption[Seq[Config]]("squbs-actors") map ((StartupType.ACTORS, _)),
         config.getOption[Seq[Config]]("squbs-services") map ((StartupType.SERVICES, _)),
+        config.getOption[Seq[Config]]("squbs-proteus") map ((StartupType.PROTEUS, _)),
         config.getOption[Seq[Config]]("squbs-extensions") map ((StartupType.EXTENSIONS, _))
       ).collect { case Some((sType, configs)) => (sType, configs) }.toMap
 
@@ -399,15 +403,25 @@ object UnicomplexBoot extends LazyLogging {
           None
       }
 
+    def startProteus(proteusConfig: Config): Option[(String, String, String, Class[_])] = {
+      val className = proteusConfig getString "class-name"
+      val name = proteusConfig.get[String]("name", className substring (className.lastIndexOf('.') + 1))
+      val clientStreaming = proteusConfig.get[Boolean]("client-streaming", false)
+      val serverStreaming = proteusConfig.get[Boolean]("server-streaming", false)
+      None
+    }
+
     val actorConfigs = components.getOrElse(StartupType.ACTORS, Seq.empty)
     val routeConfigs = components.getOrElse(StartupType.SERVICES, Seq.empty)
+    val proteusConfigs = components.getOrElse(StartupType.PROTEUS, Seq.empty)
 
     val actorInfo = actorConfigs map startActor
     val routeInfo = routeConfigs map startService
+    val proteusInfo = proteusConfigs map startProteus
 
     val startedF = cubeSupervisor ? Started // Tell the cube all actors to be started are started.
     logger.info(s"Started cube $fullName $version")
-    val componentInfo = (actorInfo ++ routeInfo) collect { case Some(component) => component }
+    val componentInfo = (actorInfo ++ routeInfo ++ proteusInfo) collect { case Some(component) => component }
     (startedF, componentInfo)
   }
 

@@ -208,7 +208,7 @@ private[unicomplex] case object HttpBindFailed
 
 case object PortBindings
 
-case class FlowWrapper(flow: Materializer => Flow[RequestContext, RequestContext, NotUsed], actor: ActorRef)
+case class RegisterContext(listeners: Seq[String], webContext: String, handler: FlowWrapper[RequestContext], ps: PipelineSetting)
 
 /**
  * The Unicomplex actor is the supervisor of the Unicomplex.

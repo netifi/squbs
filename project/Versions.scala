@@ -30,4 +30,6 @@ object Versions {
   val chronicleQueueV = "4.5.27"
   val logbackInTestV = "1.2.3"
   val curatorV = "4.0.1"
+  val proteusV = "0.4.9"
+  val reactorScalaExtensionsV = "0.3.3"
 }

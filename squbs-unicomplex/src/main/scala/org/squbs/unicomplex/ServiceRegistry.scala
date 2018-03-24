@@ -46,18 +46,18 @@ import scala.collection.JavaConverters._
 /**
   * Akka HTTP based [[ServiceRegistryBase]] implementation.
   */
-class ServiceRegistry(val log: LoggingAdapter) extends ServiceRegistryBase[Path] {
+class ServiceRegistry(val log: LoggingAdapter) extends ServiceRegistryBase[Path, RequestContext] {
 
   case class ServerBindingInfo(serverBinding: Option[ServerBinding], exception: Option[Throwable] = None)
 
   private var serverBindings = Map.empty[String, ServerBindingInfo] // Service actor and HttpListener actor
 
-  var listenerRoutesVar = Map.empty[String, Seq[(Path, FlowWrapper, PipelineSetting)]]
+  var listenerRoutesVar = Map.empty[String, Seq[(Path, FlowWrapper[RequestContext], PipelineSetting)]]
 
-  override protected def listenerRoutes: Map[String, Seq[(Path, FlowWrapper, PipelineSetting)]] = listenerRoutesVar
+  override protected def listenerRoutes: Map[String, Seq[(Path, FlowWrapper[RequestContext], PipelineSetting)]] = listenerRoutesVar
 
-  override protected def listenerRoutes_=[B](newListenerRoutes: Map[String, Seq[(B, FlowWrapper, PipelineSetting)]]): Unit =
-    listenerRoutesVar = newListenerRoutes.asInstanceOf[Map[String, Seq[(Path, FlowWrapper, PipelineSetting)]]]
+  override protected def listenerRoutes_=[B](newListenerRoutes: Map[String, Seq[(B, FlowWrapper[RequestContext], PipelineSetting)]]): Unit =
+    listenerRoutesVar = newListenerRoutes.asInstanceOf[Map[String, Seq[(Path, FlowWrapper[RequestContext], PipelineSetting)]]]
 
   override private[unicomplex] def startListener(name: String, config: Config, notifySender: ActorRef)
                                                 (implicit context: ActorContext): Receive = {
@@ -111,7 +111,7 @@ class ServiceRegistry(val log: LoggingAdapter) extends ServiceRegistryBase[Path]
     }
   }
 
-  override private[unicomplex] def registerContext(listeners: Iterable[String], webContext: String, servant: FlowWrapper,
+  override private[unicomplex] def registerContext(listeners: Iterable[String], webContext: String, servant: FlowWrapper[RequestContext],
                                                    ps: PipelineSetting)(implicit context: ActorContext) {
 
     // Calling this here just to see if it would throw an exception.

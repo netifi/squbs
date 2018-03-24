@@ -16,11 +16,13 @@
 
 package org.squbs.unicomplex
 
+import akka.NotUsed
 import javax.net.ssl.SSLContext
-
 import akka.actor.Actor._
 import akka.actor.{ActorContext, ActorRef}
 import akka.event.LoggingAdapter
+import akka.stream.Materializer
+import akka.stream.scaladsl.Flow
 import com.typesafe.config.Config
 import org.squbs.pipeline.PipelineSetting
 import org.squbs.util.ConfigUtil._
@@ -30,17 +32,17 @@ import scala.collection.mutable.ListBuffer
 import scala.util.control.NonFatal
 import scala.collection.JavaConverters._
 
-trait ServiceRegistryBase[A] {
+trait ServiceRegistryBase[A, Context] {
 
   val log: LoggingAdapter
 
-  protected def listenerRoutes: Map[String, Seq[(A, FlowWrapper, PipelineSetting)]]
+  protected def listenerRoutes: Map[String, Seq[(A, FlowWrapper[Context], PipelineSetting)]]
 
-  protected def listenerRoutes_=[B](newListenerRoutes: Map[String, Seq[(B, FlowWrapper, PipelineSetting)]]): Unit
+  protected def listenerRoutes_=[B](newListenerRoutes: Map[String, Seq[(B, FlowWrapper[Context], PipelineSetting)]]): Unit
 
   private[unicomplex] def prepListeners(listenerNames: Iterable[String])(implicit context: ActorContext) {
     listenerRoutes = listenerNames.map { listener =>
-      listener -> Seq.empty[(A, FlowWrapper, PipelineSetting)]
+      listener -> Seq.empty[(A, FlowWrapper[Context], PipelineSetting)]
     }.toMap
 
     import org.squbs.unicomplex.JMX._
@@ -50,7 +52,7 @@ trait ServiceRegistryBase[A] {
 
   protected def listenerStateMXBean(): ListenerStateMXBean
 
-  private[unicomplex] def registerContext(listeners: Iterable[String], webContext: String, servant: FlowWrapper,
+  private[unicomplex] def registerContext(listeners: Iterable[String], webContext: String, servant: FlowWrapper[Context],
                                           ps: PipelineSetting)(implicit context: ActorContext): Unit
 
   protected def pathCompanion(s: String): A
@@ -62,7 +64,7 @@ trait ServiceRegistryBase[A] {
 
     listenerRoutes = listenerRoutes flatMap {
       case (listener, routes) => webContexts map { ctx =>
-        val buffer = ListBuffer[(A, FlowWrapper, PipelineSetting)]()
+        val buffer = ListBuffer[(A, FlowWrapper[Context], PipelineSetting)]()
         val path = pathCompanion(ctx)
         routes.foreach {
           entry => if (!entry._1.equals(path)) buffer += entry
@@ -152,7 +154,7 @@ trait ServiceRegistryBase[A] {
   }
 }
 
-case class RegisterContext(listeners: Seq[String], webContext: String, handler: FlowWrapper, ps: PipelineSetting)
+case class FlowWrapper[Context](flow: Materializer => Flow[Context, Context, NotUsed], actor: ActorRef)
 
 object WithWebContext {
 
@@ -173,7 +175,7 @@ trait WebContext {
   protected final val webContext: String = WithWebContext.localContext.get.get
 }
 
-class ListenerBean[A](listenerRoutes: => Map[String, Seq[(A, FlowWrapper, PipelineSetting)]]) extends ListenerMXBean {
+class ListenerBean[A, Context](listenerRoutes: => Map[String, Seq[(A, FlowWrapper[Context], PipelineSetting)]]) extends ListenerMXBean {
 
   override def getListeners: java.util.List[ListenerInfo] = {
     listenerRoutes.flatMap { case (listenerName, routes) =>

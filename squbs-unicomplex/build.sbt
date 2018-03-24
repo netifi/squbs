@@ -4,6 +4,8 @@ name := "squbs-unicomplex"
 
 javaOptions in Test += "-Xmx512m"
 
+resolvers += Resolver.jcenterRepo
+
 libraryDependencies ++= Seq(
   "org.scala-lang" % "scala-reflect" % scalaVersion.value,
   "org.scalatest" %% "scalatest" % scalatestV % "test->*",
@@ -13,7 +15,7 @@ libraryDependencies ++= Seq(
   "junit" % "junit" % junitV % "test",
   "com.novocode" % "junit-interface" % junitInterfaceV % "test->default",
   "org.scalatest" %% "scalatest" % scalatestV % "test->*"
-) ++ akka
+) ++ akka ++ proteus
 
 def akka = Seq(
   "com.typesafe.akka" %% "akka-actor" % akkaV,
@@ -21,6 +23,12 @@ def akka = Seq(
   "com.typesafe.akka" %% "akka-http" % akkaHttpV,
   "com.typesafe.akka" %% "akka-testkit" % akkaV % "test",
   "com.typesafe.akka" %% "akka-stream-testkit" % akkaV % "test"
+)
+
+def proteus = Seq(
+  "io.netifi.proteus" % "core" % Versions.proteusV,
+  "io.netifi.proteus" % "client" % Versions.proteusV,
+  "io.projectreactor" %% "reactor-scala-extensions" % Versions.reactorScalaExtensionsV
 )
 
 testOptions in Test ++= Seq(

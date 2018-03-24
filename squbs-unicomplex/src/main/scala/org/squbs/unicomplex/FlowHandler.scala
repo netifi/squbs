@@ -31,7 +31,7 @@ import scala.util.{Success, Try}
 
 object FlowHandler {
 
-  def apply(routes: Seq[(Path, FlowWrapper, PipelineSetting)], localPort: Option[Int])
+  def apply(routes: Seq[(Path, FlowWrapper[RequestContext], PipelineSetting)], localPort: Option[Int])
            (implicit system: ActorSystem, materializer: Materializer): FlowHandler = {
     new FlowHandler(routes, localPort)
   }
@@ -50,7 +50,7 @@ object FlowHandler {
   }
 }
 
-class FlowHandler(routes: Seq[(Path, FlowWrapper, PipelineSetting)], localPort: Option[Int])
+class FlowHandler(routes: Seq[(Path, FlowWrapper[RequestContext], PipelineSetting)], localPort: Option[Int])
                  (implicit system: ActorSystem, materializer: Materializer) {
 
   import FlowHandler._
