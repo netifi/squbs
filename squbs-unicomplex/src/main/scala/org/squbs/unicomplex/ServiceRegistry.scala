@@ -102,12 +102,12 @@ class ServiceRegistry(val log: LoggingAdapter) extends ServiceRegistryBase[Path,
       case sb: ServerBinding =>
         serverBindings = serverBindings + (name -> ServerBindingInfo(Some(sb)))
         notifySender ! Ack
-        uniSelf ! HttpBindSuccess
+        uniSelf ! BindSuccess
       case ActorFailure(ex) if ex.isInstanceOf[BindFailedException] =>
         serverBindings = serverBindings + (name -> ServerBindingInfo(None, Some(ex)))
         log.error(s"Failed to bind listener $name. Cleaning up. System may not function properly.")
         notifySender ! ex
-        uniSelf ! HttpBindFailed
+        uniSelf ! BindFailed
     }
   }
 

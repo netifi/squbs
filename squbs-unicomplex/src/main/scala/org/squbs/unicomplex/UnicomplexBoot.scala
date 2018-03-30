@@ -131,9 +131,14 @@ object UnicomplexBoot extends LazyLogging {
     })
 
     // Read listener and alias information.
-    val (activeAliases, activeListeners, missingAliases) = findListeners(boot.config, cubeList)
+    val (activeAliases, activeListeners, missingAliases) = findListeners(boot.config, cubeList, StartupType.SERVICES)
     missingAliases foreach { name => logger.warn(s"Requested listener $name not found!") }
-    boot.copy(cubes = cubeList, jarConfigs = jarConfigs, listeners = activeListeners, listenerAliases = activeAliases)
+
+    // Read rsocket and alias information.
+    val (rSocketAliases, rSockets, missingRSockets) = findListeners(boot.config, cubeList, StartupType.PROTEUS)
+    missingRSockets foreach { name => logger.warn(s"Requested rsocket $name not found!") }
+
+    boot.copy(cubes = cubeList, jarConfigs = jarConfigs, listeners = activeListeners, listenerAliases = activeAliases, rSockets = rSockets, rSocketAliases = rSocketAliases)
   }
 
   private def createReaderFromFS(directory: File): String => Option[Reader] = {
@@ -281,7 +286,7 @@ object UnicomplexBoot extends LazyLogging {
     }
   }
 
-  private[unicomplex] def startComponents(cube: CubeInit, aliases: Map[String, String])
+  private[unicomplex] def startComponents(cube: CubeInit, listenerAliases: Map[String, String], rSocketAliases: Map[String, String])
                                          (implicit actorSystem: ActorSystem,
                                           timeout: Timeout = UnicomplexBoot.defaultStartupTimeout) = {
     import cube.components
@@ -371,9 +376,9 @@ object UnicomplexBoot extends LazyLogging {
         val pipelineSettings = (pipeline, defaultFlowsOn)
 
         val listeners = serviceConfig.getOption[Seq[String]]("listeners").fold(Seq("default-listener")) { list =>
-          if (list.contains("*")) aliases.values.toSeq.distinct
+          if (list.contains("*")) listenerAliases.values.toSeq.distinct
           else list flatMap { entry =>
-            aliases.get(entry) match {
+            listenerAliases.get(entry) match {
               case Some(listener) => Seq(listener)
               case None =>
                 logger.warn(s"Listener $entry required by $fullName is not configured. Ignoring.")
@@ -403,13 +408,60 @@ object UnicomplexBoot extends LazyLogging {
           None
       }
 
-    def startProteus(proteusConfig: Config): Option[(String, String, String, Class[_])] = {
-      val className = proteusConfig getString "class-name"
-      val name = proteusConfig.get[String]("name", className substring (className.lastIndexOf('.') + 1))
-      val clientStreaming = proteusConfig.get[Boolean]("client-streaming", false)
-      val serverStreaming = proteusConfig.get[Boolean]("server-streaming", false)
-      None
+    def startProteusActor(clazz: Class[_], namespace: String, service: String, clientStreaming: Boolean, serverStreaming: Boolean, rSockets: Seq[String], initRequired: Boolean) = {
+
+      Try {
+        (clazz asSubclass classOf[ProteusDefinition], classOf[ProteusActor])
+      } map { case (proteusClass, proteusActor) =>
+        val props = Props(proteusActor, namespace, service, clientStreaming, serverStreaming, proteusClass)
+        val actorName = s"$namespace-$service-proteus"
+
+        // Send the props to be started by the cube.
+        cubeSupervisor ! StartCubeProteus(namespace, service, clientStreaming, serverStreaming, rSockets, props, actorName, initRequired)
+        (fullName, name, version, clazz)
+      }
     }
+
+    def startProteus(proteusConfig: Config): Option[(String, String, String, Class[_])] =
+      Try {
+        val className = proteusConfig getString "class-name"
+        val clazz = Class.forName(className, true, getClass.getClassLoader)
+        val namespace = proteusConfig.get[String]("namespace", className substring(0, className.lastIndexOf('.')))
+        val service = proteusConfig.get[String]("service", className substring (className.lastIndexOf('.') + 1))
+        val clientStreaming = proteusConfig.get[Boolean]("client-streaming", false)
+        val serverStreaming = proteusConfig.get[Boolean]("server-streaming", false)
+        val initRequired = proteusConfig.get[Boolean]("init-required", false)
+
+        val rSockets = proteusConfig.getOption[Seq[String]]("listeners").fold(Seq("default-rsocket")) { list =>
+          if (list.contains("*")) rSocketAliases.values.toSeq.distinct
+          else list flatMap { entry =>
+            rSocketAliases.get(entry) match {
+              case Some(listener) => Seq(listener)
+              case None =>
+                logger.warn(s"RSocket $entry required by $fullName is not configured. Ignoring.")
+                Seq.empty[String]
+            }
+          }
+        }
+
+        val proteusActor = startProteusActor(clazz, namespace, service, clientStreaming, serverStreaming, rSockets, initRequired)
+        proteusActor match {
+          case Success(svc) => svc
+          case Failure(e) =>
+            throw new IOException(s"Class $className is not a ProteusDefinition.", e)
+        }
+      } match {
+        case Success(svc) => Some(svc)
+        case Failure(e) =>
+          val t = getRootCause(e)
+          logger.warn(s"Can't load Proteus definition $proteusConfig.\n" +
+            s"Cube: $fullName $version\n" +
+            s"Path: $jarPath\n" +
+            s"${t.getClass.getName}: ${t.getMessage}")
+          t.printStackTrace()
+          cubeSupervisor ! StartFailure(e)
+          None
+      }
 
     val actorConfigs = components.getOrElse(StartupType.ACTORS, Seq.empty)
     val routeConfigs = components.getOrElse(StartupType.SERVICES, Seq.empty)
@@ -425,9 +477,9 @@ object UnicomplexBoot extends LazyLogging {
     (startedF, componentInfo)
   }
 
-  def configuredListeners(config: Config): Map[String, Config] = {
+  def configuredListeners(config: Config, listenerType: String): Map[String, Config] = {
     val listeners = config.root.asScala.toSeq.collect {
-      case (n, v: ConfigObject) if v.toConfig.getOption[String]("type").contains("squbs.listener") => (n, v.toConfig)
+      case (n, v: ConfigObject) if v.toConfig.getOption[String]("type").contains(listenerType) => (n, v.toConfig)
     }
 
     resolveDuplicates[Config](listeners, (name, conf, c) =>
@@ -455,16 +507,24 @@ object UnicomplexBoot extends LazyLogging {
     }
   }
 
-  def findListeners(config: Config, cubes: Seq[CubeInit]) = {
+  def findListeners(config: Config, cubes: Seq[CubeInit], component: StartupType.Value) = {
+    val defaultListener = component match {
+      case StartupType.SERVICES => "default-listener"
+      case StartupType.PROTEUS => "default-rsocket"
+    }
     val demandedListeners =
       for {
-        routes <- cubes.map { _.components.get(StartupType.SERVICES) }.collect { case Some(routes) => routes }.flatten
-        routeListeners <- routes.get[Seq[String]]("listeners", Seq("default-listener"))
+        routes <- cubes.map { _.components.get(component) }.collect { case Some(routes) => routes }.flatten
+        routeListeners <- routes.get[Seq[String]]("listeners", Seq(defaultListener))
         if routeListeners != "*" // Filter out wildcard listener bindings, not starting those.
       } yield {
         routeListeners
       }
-    val listeners = configuredListeners(config)
+    val listenerType = component match {
+      case StartupType.SERVICES => "squbs.listener"
+      case StartupType.PROTEUS => "squbs.rsocket"
+    }
+    val listeners = configuredListeners(config, listenerType)
     val aliases = findListenerAliases(listeners)
     val activeAliases = aliases filter { case (n, _) => demandedListeners contains n }
     val missingAliases = demandedListeners filterNot { l => activeAliases exists { case (n, _) => n == l } }
@@ -488,6 +548,21 @@ object UnicomplexBoot extends LazyLogging {
     logger.info(s"Web Service started in $elapsed milliseconds")
   }
 
+  def startProteusInfra(boot: UnicomplexBoot)(implicit actorSystem: ActorSystem) {
+    import actorSystem.dispatcher
+    val startTime = System.nanoTime
+    implicit val timeout = Timeout((boot.rSockets.size * 10) seconds)
+    val ackFutures =
+      for ((rSocketName, config) <- boot.rSockets) yield {
+        Unicomplex(actorSystem).uniActor ? StartProteus(rSocketName, config)
+      }
+    // Block for the web service to be started.
+    Await.ready(Future.sequence(ackFutures), timeout.duration)
+
+    val elapsed = (System.nanoTime - startTime) / 1000000
+    logger.info(s"Proteus started in $elapsed milliseconds")
+  }
+
   @tailrec
   private[unicomplex] def getRootCause(e: Throwable): Throwable = {
     Option(e.getCause) match {
@@ -504,6 +579,8 @@ case class UnicomplexBoot private[unicomplex](startTime: Timestamp,
                                               cubes: Seq[CubeInit] = Seq.empty,
                                               listeners: Map[String, Config] = Map.empty,
                                               listenerAliases: Map[String, String] = Map.empty,
+                                              rSockets: Map[String, Config] = Map.empty,
+                                              rSocketAliases: Map[String, String] = Map.empty,
                                               jarConfigs: Seq[(String, Config)] = Seq.empty,
                                               jarNames: Seq[String] = Seq.empty,
                                               actors: Seq[(String, String, String, Class[_])] = Seq.empty,
@@ -595,6 +672,8 @@ case class UnicomplexBoot private[unicomplex](startTime: Timestamp,
     // Notify Unicomplex that services will be started.
     if (startServices) uniActor ! PreStartWebService(listeners)
 
+    val startProteus = rSockets.nonEmpty && cubes.exists(_.components.contains(StartupType.PROTEUS))
+
     // Signal started to Unicomplex.
     uniActor ! Started
 
@@ -602,7 +681,7 @@ case class UnicomplexBoot private[unicomplex](startTime: Timestamp,
     uniActor ! Extensions(preCubesInitExtensions)
 
     // Start all actors
-    val (futures, actorsUnflat) = cubes.map(startComponents(_, listenerAliases)).unzip
+    val (futures, actorsUnflat) = cubes.map(startComponents(_, listenerAliases, rSocketAliases)).unzip
     val actors = actorsUnflat.flatten
 
     import actorSystem.dispatcher
@@ -610,6 +689,9 @@ case class UnicomplexBoot private[unicomplex](startTime: Timestamp,
 
     // Start the service infrastructure if services are enabled and registered.
     if (startServices) startServiceInfra(this)
+
+    // Start the service infrastructure if services are enabled and registered.
+    if (startProteus) startProteusInfra(this)
 
     val postInitExtensions = preCubesInitExtensions map extensionOp("postInit", _.postInit())
 

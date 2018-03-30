@@ -21,8 +21,8 @@ import java.io.{PrintWriter, StringWriter}
 import java.util
 import java.util.Date
 import java.util.concurrent.ConcurrentHashMap
-import javax.management.ObjectName
 
+import javax.management.ObjectName
 import akka.NotUsed
 import akka.actor.SupervisorStrategy._
 import akka.actor.{Extension => AkkaExtension, _}
@@ -33,6 +33,7 @@ import akka.pattern._
 import akka.stream.{ActorMaterializer, ActorMaterializerSettings, Materializer, Supervision}
 import akka.stream.scaladsl.Flow
 import com.typesafe.config.Config
+import io.rsocket.Payload
 import org.squbs.lifecycle.{ExtensionLifecycle, GracefulStop, GracefulStopHelper}
 import org.squbs.pipeline.{PipelineSetting, RequestContext}
 import org.squbs.unicomplex.UnicomplexBoot.StartupType
@@ -123,10 +124,14 @@ import org.squbs.unicomplex.Unicomplex._
 private[unicomplex] case class PreStartWebService(listeners: Map[String, Config])
 private[unicomplex] case object StartWebService
 private[unicomplex] case class  StartListener(name: String, config: Config)
+private[unicomplex] case class  StartProteus(name: String, config: Config)
 private[unicomplex] case object RoutesStarted
 private[unicomplex] case class  StartCubeActor(props: Props, name: String = "", initRequired: Boolean = false)
 private[unicomplex] case class  StartCubeService(webContext: String, listeners: Seq[String], props: Props,
                                                  name: String = "", ps: PipelineSetting, initRequired: Boolean = false)
+private[unicomplex] case class  StartCubeProteus(namespace: String, service: String, clientStreaming: Boolean,
+                                                 serverStreaming: Boolean, rSockets: Seq[String], props: Props,
+                                                 name: String = "", initRequired: Boolean = false)
 private[unicomplex] case class  StartFailure(t: Throwable)
 
 private[unicomplex] case object CheckInitStatus
@@ -203,12 +208,13 @@ case class StopTimeout(timeout: FiniteDuration)
 case class StopCube(name: String)
 case class StartCube(name: String)
 
-private[unicomplex] case object HttpBindSuccess
-private[unicomplex] case object HttpBindFailed
+private[unicomplex] case object BindSuccess
+private[unicomplex] case object BindFailed
 
 case object PortBindings
 
 case class RegisterContext(listeners: Seq[String], webContext: String, handler: FlowWrapper[RequestContext], ps: PipelineSetting)
+case class RegisterService(rSockets: Seq[String], namespace: String, service: String, clientStreaming: Boolean, serverStreaming: Boolean, handler: FlowWrapper[Payload])
 
 /**
  * The Unicomplex actor is the supervisor of the Unicomplex.
@@ -249,6 +255,8 @@ class Unicomplex extends Actor with Stash with ActorLogging {
   private var servicesStarted= false
 
   lazy val serviceRegistry = new ServiceRegistry(log)
+
+  lazy val proteusRegistry = new ProteusRegistry(log)
 
   private val unicomplexExtension = Unicomplex(context.system)
   import unicomplexExtension._
@@ -411,7 +419,7 @@ class Unicomplex extends Actor with Stash with ActorLogging {
           context.unbecome()
         case ActorIdentity(`name`, None) =>
           boot.get().cubes.find(_.info.name == name) foreach {cube =>
-            UnicomplexBoot.startComponents(cube, boot.get().listenerAliases)(context.system)
+            UnicomplexBoot.startComponents(cube, boot.get().listenerAliases, boot.get().rSocketAliases)(context.system)
           }
           responder ! Ack
           unstashAll()
@@ -443,16 +451,39 @@ class Unicomplex extends Actor with Stash with ActorLogging {
     case RegisterContext(listeners, webContext, serviceHandler, ps) =>
       sender() ! Try { serviceRegistry.registerContext(listeners, webContext, serviceHandler, ps) }
 
+    case RegisterService(rSockets, namespace, service, clientStreaming, serverStreaming, serviceHandler) =>
+      sender() ! Try { proteusRegistry.registerService(rSockets, namespace, service, clientStreaming, serverStreaming, serviceHandler) }
+
     case StartListener(name, conf) => // Sent from Bootstrap to start the web service infrastructure.
 
       Try { serviceRegistry.startListener(name, conf, notifySender = sender()) } match {
         case Success(startupBehavior) =>
           context.become(startupBehavior orElse {
-            case HttpBindSuccess =>
+            case BindSuccess =>
               if (serviceRegistry.isListenersBound) updateSystemState(checkInitState())
               context.unbecome()
               unstashAll()
-            case HttpBindFailed =>
+            case BindFailed =>
+              updateSystemState(checkInitState())
+              context.unbecome()
+              unstashAll()
+
+            case _ => stash()
+          },
+            discardOld = false)
+
+        case Failure(t) => updateSystemState(checkInitState())
+      }
+
+    case StartProteus(name, conf) => // Sent from Bootstrap to start the proteus infrastructure.
+      Try { proteusRegistry.startListener(name, conf, notifySender = sender()) } match {
+        case Success(startupBehavior) =>
+          context.become(startupBehavior orElse {
+            case BindSuccess =>
+              updateSystemState(checkInitState())
+              context.unbecome()
+              unstashAll()
+            case BindFailed =>
               updateSystemState(checkInitState())
               context.unbecome()
               unstashAll()
@@ -733,6 +764,22 @@ class CubeSupervisor extends Actor with ActorLogging with GracefulStopHelper {
         pendingNotifiees.foreach(_ ! Started)
         pendingNotifiees = Seq.empty
         context.unbecome()
+      }
+
+    case StartCubeProteus(namespace, service, clientStreaming, serverStreaming, rSockets, props, name, initRequired)
+      if classOf[ProteusSupplier].isAssignableFrom(props.actorClass) =>
+      val hostActor = context.actorOf(props, name)
+      if (initRequired) initMap += hostActor -> None
+      (hostActor ? ProteusRequest).mapTo[Try[Materializer => Flow[Payload, Payload, NotUsed]]] onSuccess {
+        case Success(flow) =>
+          val reg = RegisterService(rSockets, namespace, service, clientStreaming, serverStreaming, FlowWrapper(flow, hostActor))
+          (Unicomplex() ? reg).mapTo[Try[_]].map {
+            case Success(_) => log.info(s"Registered Proteus service $namespace:$service")
+            case Failure(t) => log.info(s"Failed to register Proteus service $namespace:$service")
+          }
+
+        case Failure(e) =>
+          log.error(e, s"Failed to start Proteus actor ${hostActor.path}")
       }
 
     case StartFailure(t) =>

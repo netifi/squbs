@@ -26,9 +26,9 @@ def akka = Seq(
 )
 
 def proteus = Seq(
-  "io.netifi.proteus" % "core" % Versions.proteusV,
-  "io.netifi.proteus" % "client" % Versions.proteusV,
-  "io.projectreactor" %% "reactor-scala-extensions" % Versions.reactorScalaExtensionsV
+  "io.netifi.proteus" % "core" % proteusV,
+  "io.netifi.proteus" % "client" % proteusV,
+  "io.projectreactor" %% "reactor-scala-extensions" % reactorScalaExtensionsV
 )
 
 testOptions in Test ++= Seq(

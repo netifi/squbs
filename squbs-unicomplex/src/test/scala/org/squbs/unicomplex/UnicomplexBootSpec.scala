@@ -177,7 +177,7 @@ class UnicomplexBootSpec extends FunSpecLike with Matchers {
           |some-other-config = foo
         """.stripMargin
       val config = ConfigFactory.parseString(appConf)
-      val listeners = configuredListeners(config)
+      val listeners = configuredListeners(config, "squbs.listener")
       listeners.size should be (2)
       listeners.keys should contain only ("default-listener", "secure-listener")
       listeners.toMap.apply("secure-listener").getInt("bind-port") should be (8443)
@@ -237,7 +237,7 @@ class UnicomplexBootSpec extends FunSpecLike with Matchers {
         CubeInit(Cube("foo", "com.foo.bar", "1.0.0", "don't care"), Map(StartupType.SERVICES -> Seq(route1))),
         CubeInit(Cube("bar", "com.foo.bar", "1.0.0", "don't care"), Map(StartupType.SERVICES -> Seq(route2, route3))))
 
-      val (activeAliases, activeListeners, missingListeners) = findListeners(appConf, cubeList)
+      val (activeAliases, activeListeners, missingListeners) = findListeners(appConf, cubeList, StartupType.SERVICES)
       activeAliases.keys should contain only ("secure-listener", "secure2-listener")
       activeListeners.keys should contain only "secure-listener"
       missingListeners should contain only "local-listener"
